@@ -1,0 +1,53 @@
+{
+  "region": "BC Lower Mainland",
+  "queries": [
+    {
+      "target_category": "bonded_cross_border",
+      "query": "bonded warehouse Vancouver BC"
+    },
+    {
+      "target_category": "bonded_cross_border",
+      "query": "sufferance warehouse Vancouver BC"
+    },
+    {
+      "target_category": "bonded_cross_border",
+      "query": "cross border warehousing Vancouver BC"
+    },
+    {
+      "target_category": "bonded_cross_border",
+      "query": "customs bonded warehouse Richmond BC"
+    },
+    {
+      "target_category": "bonded_cross_border",
+      "query": "transborder freight forwarder warehouse Surrey BC"
+    },
+    {
+      "target_category": "cold_food_grade",
+      "query": "cold storage Vancouver BC"
+    },
+    {
+      "target_category": "cold_food_grade",
+      "query": "food grade warehousing Vancouver BC"
+    },
+    {
+      "target_category": "cold_food_grade",
+      "query": "refrigerated warehousing Surrey BC"
+    },
+    {
+      "target_category": "cold_food_grade",
+      "query": "temperature controlled warehouse Richmond BC"
+    },
+    {
+      "target_category": "cold_food_grade",
+      "query": "reefer logistics Vancouver BC"
+    },
+    {
+      "target_category": "general_3pl",
+      "query": "3PL warehouse Surrey BC"
+    },
+    {
+      "target_category": "general_3pl",
+      "query": "third party logistics warehouse Delta BC"
+    }
+  ]
+}
