@@ -17,6 +17,11 @@ It finds provider candidates, enriches them, scores fit for the buyer panel, ded
 - `output/providers_scored.csv`: enriched and scored provider records.
 - `output/providers_scored.jsonl`: scored provider intermediate for downstream agents.
 - `output/call_sheet.csv`: top call targets with a call angle and opener.
+- `output/provider_contacts_raw.csv`: website-discovered provider contacts and fallback routes.
+- `output/provider_contacts_raw.jsonl`: raw contact intermediate for downstream agents.
+- `output/provider_contacts_scored.csv`: deduped and role-scored provider contacts.
+- `output/provider_contacts_scored.jsonl`: scored contact intermediate for downstream agents.
+- `output/provider_contact_call_sheet.csv`: call-ready provider contacts for buyer-panel outreach.
 
 Lead products covered:
 
@@ -135,6 +140,44 @@ python -m provider_pipeline audit-providers --limit 25
 python -m provider_pipeline build-call-sheet
 ```
 
+`ContactFinderAgent`
+- Reads `output/providers_scored.jsonl`
+- Skips providers with `verification_status=rejected`
+- Checks public company website pages first: home, contact, about, team, leadership, management, locations, sales, and services pages
+- Extracts visible names, titles, emails, phones, mailto/tel links, and LinkedIn URLs that are already published on the company site
+- Writes `output/provider_contacts_raw.csv` and `output/provider_contacts_raw.jsonl`
+
+```bash
+python -m provider_pipeline find-provider-contacts
+```
+
+`ContactRoleScoringAgent`
+- Reads `output/provider_contacts_raw.jsonl`
+- Scores contacts for selling accepted RFQs to provider companies
+- Prioritizes owners, founders, presidents, CEOs, general managers, branch managers, managing directors, sales/business development leaders, and relevant operations managers
+- Penalizes unrelated HR, accounting, finance, driver, mechanic, and IT roles
+- Dedupes contacts and keeps the best 1-3 contacts per company
+- Writes `output/provider_contacts_scored.csv` and `output/provider_contacts_scored.jsonl`
+
+```bash
+python -m provider_pipeline score-provider-contacts
+```
+
+`ProviderContactCallSheetAgent`
+- Reads `output/provider_contacts_scored.jsonl`
+- Writes `output/provider_contact_call_sheet.csv`
+- Sorts by provider priority, provider score, contact call priority, and role fit score
+
+```bash
+python -m provider_pipeline build-provider-contact-call-sheet
+```
+
+Run all three contact stages after provider scoring:
+
+```bash
+python -m provider_pipeline run-contact-flow
+```
+
 ## How The Pipeline Works
 
 1. `ProviderFinderAgent` reads search terms from `config/provider_queries.json`.
@@ -145,6 +188,15 @@ python -m provider_pipeline build-call-sheet
 6. Optional `ProviderAuditAgent` uses the review model to audit high-value approved/review providers.
 7. `ProviderScoringAgent` reads audited records when present, otherwise verified records, and applies the scoring model.
 8. `CallSheetAgent` reads the scored JSONL and writes the final call sheet CSV.
+9. Optional contact flow reads the scored provider JSONL and creates call-ready contacts for provider buyer-panel outreach.
+
+## Contact Flow Notes
+
+The contact flow is website-first and produces new outputs instead of changing the existing provider outputs. It is designed to find the best person or route at each provider company so you can call or email about paying for accepted RFQs.
+
+LinkedIn scraping is intentionally not supported. The pipeline may store LinkedIn URLs that appear on a public company website, but it does not automate LinkedIn browsing, login, or scraping.
+
+Paid enrichment is disabled by default. The code includes a placeholder for Hunter/Apollo-style enrichment, but missing `HUNTER_API_KEY` or `APOLLO_API_KEY` values do not stop the flow, and no paid API calls are made by the current commands.
 
 ## Provider CRM Columns
 

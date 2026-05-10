@@ -6,7 +6,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Iterable
 
-from provider_pipeline.models import EvidenceItem, ProviderRecord
+from provider_pipeline.models import ContactRecord, EvidenceItem, ProviderRecord
 
 
 RAW_FIELDS = [
@@ -143,6 +143,52 @@ CALL_SHEET_FIELDS = [
     "evidence_urls",
 ]
 
+CONTACT_FIELDS = [
+    "company",
+    "provider_place_id",
+    "provider_category",
+    "provider_priority",
+    "provider_score",
+    "city",
+    "company_phone",
+    "company_website",
+    "contact_name",
+    "contact_title",
+    "department",
+    "email",
+    "email_status",
+    "direct_phone",
+    "linkedin_url",
+    "source_url",
+    "source_type",
+    "seniority_score",
+    "role_fit_score",
+    "confidence",
+    "recommended_channel",
+    "call_priority",
+    "call_opener",
+    "notes",
+]
+
+PROVIDER_CONTACT_CALL_SHEET_FIELDS = [
+    "company",
+    "provider_score",
+    "provider_category",
+    "provider_priority",
+    "city",
+    "contact_name",
+    "contact_title",
+    "email",
+    "direct_phone",
+    "company_phone",
+    "recommended_channel",
+    "source_url",
+    "call_priority",
+    "role_fit_score",
+    "call_opener",
+    "notes",
+]
+
 
 def write_raw_csv(path: Path, records: Iterable[ProviderRecord]) -> None:
     rows = [_row(record, RAW_FIELDS) for record in records]
@@ -177,6 +223,14 @@ def write_records_jsonl(path: Path, records: Iterable[ProviderRecord]) -> None:
             handle.write("\n")
 
 
+def write_contact_records_jsonl(path: Path, records: Iterable[ContactRecord]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(asdict(record), ensure_ascii=True))
+            handle.write("\n")
+
+
 def read_records_jsonl(path: Path) -> list[ProviderRecord]:
     records: list[ProviderRecord] = []
     with path.open("r", encoding="utf-8") as handle:
@@ -186,6 +240,30 @@ def read_records_jsonl(path: Path) -> list[ProviderRecord]:
                 continue
             records.append(_record_from_dict(json.loads(line)))
     return records
+
+
+def read_contact_records_jsonl(path: Path) -> list[ContactRecord]:
+    records: list[ContactRecord] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            records.append(_contact_from_dict(json.loads(line)))
+    return records
+
+
+def write_contacts_csv(path: Path, records: Iterable[ContactRecord]) -> None:
+    rows = [_contact_row(record, CONTACT_FIELDS) for record in records]
+    _write_csv(path, CONTACT_FIELDS, rows)
+
+
+def write_provider_contact_call_sheet_csv(path: Path, records: Iterable[ContactRecord]) -> int:
+    call_records = list(records)
+    call_records.sort(key=_provider_contact_sort_key)
+    rows = [_contact_row(record, PROVIDER_CONTACT_CALL_SHEET_FIELDS) for record in call_records]
+    _write_csv(path, PROVIDER_CONTACT_CALL_SHEET_FIELDS, rows)
+    return len(rows)
 
 
 def write_call_sheet_csv(path: Path, records: Iterable[ProviderRecord]) -> int:
@@ -213,7 +291,7 @@ def build_call_opener(record: ProviderRecord) -> str:
     lead_types = []
     if record.provider_category == "bonded_cross_border":
         lead_types.append("bonded, sufferance, or cross-border warehousing")
-    if record.has_cold_storage or record.has_food_grade:
+    if record.provider_category == "cold_food_grade" or record.has_cold_storage or record.has_food_grade:
         lead_types.append("cold storage or food-grade warehousing")
     if not lead_types:
         lead_types.append("3PL warehousing")
@@ -249,6 +327,22 @@ def _row(record: ProviderRecord, fields: list[str]) -> dict[str, str]:
         else:
             row[field] = "" if value is None else str(value)
     return row
+
+
+def _contact_row(record: ContactRecord, fields: list[str]) -> dict[str, str]:
+    data = asdict(record)
+    return {field: "" if data.get(field) is None else str(data.get(field, "")) for field in fields}
+
+
+def _provider_contact_sort_key(record: ContactRecord) -> tuple[int, int, int, int]:
+    provider_priority = {"A": 0, "B": 1, "C": 2}.get(record.provider_priority, 3)
+    contact_priority = {"A": 0, "B": 1, "C": 2}.get(record.call_priority, 3)
+    return (
+        provider_priority,
+        -record.provider_score,
+        contact_priority,
+        -record.role_fit_score,
+    )
 
 
 def _record_from_dict(data: dict[str, Any]) -> ProviderRecord:
@@ -287,6 +381,35 @@ def _record_from_dict(data: dict[str, Any]) -> ProviderRecord:
         confidence=_int(data.get("confidence"), default=30),
         lead_fit_score=_int(data.get("lead_fit_score"), default=0),
         priority=_string(data.get("priority")) or "C",
+    )
+
+
+def _contact_from_dict(data: dict[str, Any]) -> ContactRecord:
+    return ContactRecord(
+        company=_string(data.get("company")),
+        provider_place_id=_string(data.get("provider_place_id")),
+        provider_category=_string(data.get("provider_category")),
+        provider_priority=_string(data.get("provider_priority")),
+        provider_score=_int(data.get("provider_score"), default=0),
+        city=_string(data.get("city")),
+        company_phone=_string(data.get("company_phone")),
+        company_website=_string(data.get("company_website")),
+        contact_name=_string(data.get("contact_name")),
+        contact_title=_string(data.get("contact_title")),
+        department=_string(data.get("department")),
+        email=_string(data.get("email")),
+        email_status=_string(data.get("email_status")),
+        direct_phone=_string(data.get("direct_phone")),
+        linkedin_url=_string(data.get("linkedin_url")),
+        source_url=_string(data.get("source_url")),
+        source_type=_string(data.get("source_type")),
+        seniority_score=_int(data.get("seniority_score"), default=0),
+        role_fit_score=_int(data.get("role_fit_score"), default=0),
+        confidence=_int(data.get("confidence"), default=0),
+        recommended_channel=_string(data.get("recommended_channel")),
+        call_priority=_string(data.get("call_priority")) or "C",
+        call_opener=_string(data.get("call_opener")),
+        notes=_string(data.get("notes")),
     )
 
 

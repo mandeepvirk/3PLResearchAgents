@@ -6,14 +6,25 @@ from pathlib import Path
 
 from provider_pipeline.config import load_config
 from provider_pipeline.csv_store import (
+    read_contact_records_jsonl,
     read_records_jsonl,
+    write_contact_records_jsonl,
+    write_contacts_csv,
     write_audited_csv,
     write_enriched_csv,
+    write_provider_contact_call_sheet_csv,
     write_raw_csv,
     write_records_jsonl,
     write_verified_csv,
     write_scored_csv,
     write_call_sheet_csv,
+)
+from provider_pipeline.contact_enrichment import enrich_contacts_if_enabled
+from provider_pipeline.contacts import (
+    contacts_from_provider,
+    dedupe_contacts,
+    keep_best_contacts_per_company,
+    score_contact,
 )
 from provider_pipeline.dedupe import dedupe_records
 from provider_pipeline.google_places import GooglePlacesClient
@@ -73,6 +84,26 @@ class PipelinePaths:
     def call_sheet_csv(self) -> Path:
         return self.output_dir / "call_sheet.csv"
 
+    @property
+    def contacts_raw_csv(self) -> Path:
+        return self.output_dir / "provider_contacts_raw.csv"
+
+    @property
+    def contacts_raw_jsonl(self) -> Path:
+        return self.output_dir / "provider_contacts_raw.jsonl"
+
+    @property
+    def contacts_scored_csv(self) -> Path:
+        return self.output_dir / "provider_contacts_scored.csv"
+
+    @property
+    def contacts_scored_jsonl(self) -> Path:
+        return self.output_dir / "provider_contacts_scored.jsonl"
+
+    @property
+    def provider_contact_call_sheet_csv(self) -> Path:
+        return self.output_dir / "provider_contact_call_sheet.csv"
+
 
 @dataclass(frozen=True)
 class FinderResult:
@@ -93,6 +124,13 @@ class RecordsStageResult:
 class CallSheetResult:
     call_sheet_count: int
     csv_path: str
+
+
+@dataclass(frozen=True)
+class ContactStageResult:
+    contact_count: int
+    csv_path: str
+    jsonl_path: str
 
 
 class ProviderFinderAgent:
@@ -317,6 +355,76 @@ class CallSheetAgent:
         )
 
 
+class ContactFinderAgent:
+    def __init__(self, output_dir: Path) -> None:
+        self.paths = PipelinePaths(output_dir)
+
+    def run(self) -> ContactStageResult:
+        providers = read_records_jsonl(
+            _require_input(self.paths.scored_jsonl, "score-providers")
+        )
+        providers = [
+            provider
+            for provider in providers
+            if provider.verification_status != "rejected"
+        ]
+        providers.sort(key=_provider_contact_rank)
+
+        contacts = []
+        for index, provider in enumerate(providers, start=1):
+            print(f"Finding contacts {index}/{len(providers)}: {provider.company}")
+            found_contacts = contacts_from_provider(provider)
+            contacts.extend(enrich_contacts_if_enabled(provider, found_contacts, enabled=False))
+
+        write_contacts_csv(self.paths.contacts_raw_csv, contacts)
+        write_contact_records_jsonl(self.paths.contacts_raw_jsonl, contacts)
+        return ContactStageResult(
+            contact_count=len(contacts),
+            csv_path=str(self.paths.contacts_raw_csv.resolve()),
+            jsonl_path=str(self.paths.contacts_raw_jsonl.resolve()),
+        )
+
+
+class ContactRoleScoringAgent:
+    def __init__(self, output_dir: Path) -> None:
+        self.paths = PipelinePaths(output_dir)
+
+    def run(self) -> ContactStageResult:
+        contacts = read_contact_records_jsonl(
+            _require_input(self.paths.contacts_raw_jsonl, "find-provider-contacts")
+        )
+        scored_contacts = [score_contact(contact) for contact in contacts]
+        deduped_contacts = dedupe_contacts(scored_contacts)
+        kept_contacts = keep_best_contacts_per_company(deduped_contacts, limit=3)
+        kept_contacts.sort(key=_contact_output_rank)
+
+        write_contacts_csv(self.paths.contacts_scored_csv, kept_contacts)
+        write_contact_records_jsonl(self.paths.contacts_scored_jsonl, kept_contacts)
+        return ContactStageResult(
+            contact_count=len(kept_contacts),
+            csv_path=str(self.paths.contacts_scored_csv.resolve()),
+            jsonl_path=str(self.paths.contacts_scored_jsonl.resolve()),
+        )
+
+
+class ProviderContactCallSheetAgent:
+    def __init__(self, output_dir: Path) -> None:
+        self.paths = PipelinePaths(output_dir)
+
+    def run(self) -> CallSheetResult:
+        contacts = read_contact_records_jsonl(
+            _require_input(self.paths.contacts_scored_jsonl, "score-provider-contacts")
+        )
+        call_sheet_count = write_provider_contact_call_sheet_csv(
+            self.paths.provider_contact_call_sheet_csv,
+            contacts,
+        )
+        return CallSheetResult(
+            call_sheet_count=call_sheet_count,
+            csv_path=str(self.paths.provider_contact_call_sheet_csv.resolve()),
+        )
+
+
 def _require_input(path: Path, command_name: str) -> Path:
     if not path.exists():
         raise FileNotFoundError(
@@ -324,6 +432,22 @@ def _require_input(path: Path, command_name: str) -> Path:
             f"{command_name}` first."
         )
     return path
+
+
+def _provider_contact_rank(record: ProviderRecord) -> tuple[int, int]:
+    priority = {"A": 0, "B": 1, "C": 2}.get(record.priority, 3)
+    return (priority, -record.lead_fit_score)
+
+
+def _contact_output_rank(contact) -> tuple[int, int, int, int]:
+    provider_priority = {"A": 0, "B": 1, "C": 2}.get(contact.provider_priority, 3)
+    contact_priority = {"A": 0, "B": 1, "C": 2}.get(contact.call_priority, 3)
+    return (
+        provider_priority,
+        -contact.provider_score,
+        contact_priority,
+        -contact.role_fit_score,
+    )
 
 
 def _audit_rank(record: ProviderRecord) -> int:

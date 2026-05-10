@@ -51,6 +51,34 @@ class ProviderRecord:
     priority: str = "C"
 
 
+@dataclass
+class ContactRecord:
+    company: str
+    provider_place_id: str = ""
+    provider_category: str = ""
+    provider_priority: str = ""
+    provider_score: int = 0
+    city: str = ""
+    company_phone: str = ""
+    company_website: str = ""
+    contact_name: str = ""
+    contact_title: str = ""
+    department: str = ""
+    email: str = ""
+    email_status: str = ""
+    direct_phone: str = ""
+    linkedin_url: str = ""
+    source_url: str = ""
+    source_type: str = ""
+    seniority_score: int = 0
+    role_fit_score: int = 0
+    confidence: int = 0
+    recommended_channel: str = ""
+    call_priority: str = "C"
+    call_opener: str = ""
+    notes: str = ""
+
+
 @dataclass(frozen=True)
 class PipelineResult:
     raw_count: int

@@ -6,7 +6,10 @@ from pathlib import Path
 
 from provider_pipeline.agents import (
     CallSheetAgent,
+    ContactFinderAgent,
+    ContactRoleScoringAgent,
     ProviderAuditAgent,
+    ProviderContactCallSheetAgent,
     ProviderEnrichmentAgent,
     ProviderFinderAgent,
     ProviderScoringAgent,
@@ -24,6 +27,10 @@ COMMANDS = {
     "audit-providers",
     "score-providers",
     "build-call-sheet",
+    "find-provider-contacts",
+    "score-provider-contacts",
+    "build-provider-contact-call-sheet",
+    "run-contact-flow",
 }
 
 
@@ -114,6 +121,30 @@ def _build_subcommand_parser() -> argparse.ArgumentParser:
         help="Read scored providers and build the call sheet CSV.",
     )
     _add_output_dir_arg(build_call_sheet)
+
+    find_provider_contacts = subparsers.add_parser(
+        "find-provider-contacts",
+        help="Read scored providers and find website contacts.",
+    )
+    _add_output_dir_arg(find_provider_contacts)
+
+    score_provider_contacts = subparsers.add_parser(
+        "score-provider-contacts",
+        help="Read raw provider contacts and score best outreach routes.",
+    )
+    _add_output_dir_arg(score_provider_contacts)
+
+    build_provider_contact_call_sheet = subparsers.add_parser(
+        "build-provider-contact-call-sheet",
+        help="Read scored provider contacts and build the provider contact call sheet CSV.",
+    )
+    _add_output_dir_arg(build_provider_contact_call_sheet)
+
+    run_contact_flow = subparsers.add_parser(
+        "run-contact-flow",
+        help="Run contact finding, contact scoring, and contact call sheet export.",
+    )
+    _add_output_dir_arg(run_contact_flow)
 
     return parser
 
@@ -233,6 +264,44 @@ def main() -> None:
         print("Done.")
         print(f"Call sheet rows: {result.call_sheet_count}")
         print(f"CSV output: {result.csv_path}")
+        return
+
+    if args.command == "find-provider-contacts":
+        result = ContactFinderAgent(output_dir=Path(args.output_dir)).run()
+        print("")
+        print("Done.")
+        print(f"Raw contacts: {result.contact_count}")
+        print(f"CSV output: {result.csv_path}")
+        print(f"JSONL output: {result.jsonl_path}")
+        return
+
+    if args.command == "score-provider-contacts":
+        result = ContactRoleScoringAgent(output_dir=Path(args.output_dir)).run()
+        print("")
+        print("Done.")
+        print(f"Scored contacts: {result.contact_count}")
+        print(f"CSV output: {result.csv_path}")
+        print(f"JSONL output: {result.jsonl_path}")
+        return
+
+    if args.command == "build-provider-contact-call-sheet":
+        result = ProviderContactCallSheetAgent(output_dir=Path(args.output_dir)).run()
+        print("")
+        print("Done.")
+        print(f"Provider contact call sheet rows: {result.call_sheet_count}")
+        print(f"CSV output: {result.csv_path}")
+        return
+
+    if args.command == "run-contact-flow":
+        raw_result = ContactFinderAgent(output_dir=Path(args.output_dir)).run()
+        scored_result = ContactRoleScoringAgent(output_dir=Path(args.output_dir)).run()
+        call_sheet_result = ProviderContactCallSheetAgent(output_dir=Path(args.output_dir)).run()
+        print("")
+        print("Done.")
+        print(f"Raw contacts: {raw_result.contact_count}")
+        print(f"Scored contacts: {scored_result.contact_count}")
+        print(f"Provider contact call sheet rows: {call_sheet_result.call_sheet_count}")
+        print(f"CSV output: {call_sheet_result.csv_path}")
         return
 
     pipeline = ProviderPipeline(
