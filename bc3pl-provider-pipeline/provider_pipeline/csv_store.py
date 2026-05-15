@@ -161,6 +161,7 @@ CONTACT_FIELDS = [
     "linkedin_url",
     "source_url",
     "source_type",
+    "contact_quality",
     "seniority_score",
     "role_fit_score",
     "confidence",
@@ -172,6 +173,7 @@ CONTACT_FIELDS = [
 
 PROVIDER_CONTACT_CALL_SHEET_FIELDS = [
     "company",
+    "provider_place_id",
     "provider_score",
     "provider_category",
     "provider_priority",
@@ -182,6 +184,12 @@ PROVIDER_CONTACT_CALL_SHEET_FIELDS = [
     "direct_phone",
     "company_phone",
     "recommended_channel",
+    "contact_quality",
+    "source_type",
+    "email_status",
+    "linkedin_url",
+    "department",
+    "confidence",
     "source_url",
     "call_priority",
     "role_fit_score",
@@ -259,7 +267,7 @@ def write_contacts_csv(path: Path, records: Iterable[ContactRecord]) -> None:
 
 
 def write_provider_contact_call_sheet_csv(path: Path, records: Iterable[ContactRecord]) -> int:
-    call_records = list(records)
+    call_records = [record for record in records if record.contact_quality != "bad_extraction"]
     call_records.sort(key=_provider_contact_sort_key)
     rows = [_contact_row(record, PROVIDER_CONTACT_CALL_SHEET_FIELDS) for record in call_records]
     _write_csv(path, PROVIDER_CONTACT_CALL_SHEET_FIELDS, rows)
@@ -403,6 +411,7 @@ def _contact_from_dict(data: dict[str, Any]) -> ContactRecord:
         linkedin_url=_string(data.get("linkedin_url")),
         source_url=_string(data.get("source_url")),
         source_type=_string(data.get("source_type")),
+        contact_quality=_string(data.get("contact_quality")),
         seniority_score=_int(data.get("seniority_score"), default=0),
         role_fit_score=_int(data.get("role_fit_score"), default=0),
         confidence=_int(data.get("confidence"), default=0),

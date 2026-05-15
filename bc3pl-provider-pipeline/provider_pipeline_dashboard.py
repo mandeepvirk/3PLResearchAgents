@@ -5,15 +5,18 @@ import subprocess
 import streamlit as st
 import pandas as pd
 
-OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+BASE_OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+LATEST_OUTPUT_DIR = os.path.join(BASE_OUTPUT_DIR, "latest")
+OUTPUT_DIR = LATEST_OUTPUT_DIR if os.path.isdir(LATEST_OUTPUT_DIR) else BASE_OUTPUT_DIR
 
 STAGE_FILES = {
-    "Raw": "providers_raw.jsonl",
-    "Enriched": "providers_enriched.jsonl",
-    "Verified": "providers_verified.jsonl",
-    "Audited": "providers_audited.jsonl",
-    "Scored": "providers_scored.jsonl",
-    "Call Sheet": "call_sheet.csv",
+    "Raw": "debug/providers_raw.jsonl",
+    "Enriched": "debug/providers_enriched.jsonl",
+    "Verified": "debug/providers_verified.jsonl",
+    "Audited": "debug/providers_audited.jsonl",
+    "Scored": "crm/providers_scored.csv",
+    "Call Sheet": "open_in_sheets/call_sheet.csv",
+    "Call Log": "open_in_sheets/call_log.csv",
 }
 
 DISPLAY_COLUMNS = [
@@ -41,6 +44,14 @@ def load_csv(filename: str) -> pd.DataFrame | None:
     path = os.path.join(OUTPUT_DIR, filename)
     if os.path.isfile(path):
         return pd.read_csv(path)
+    return None
+
+
+def load_first_csv(filenames: list[str]) -> pd.DataFrame | None:
+    for filename in filenames:
+        df = load_csv(filename)
+        if df is not None:
+            return df
     return None
 
 
@@ -105,10 +116,11 @@ for col, (stage, filename) in zip(cols, STAGE_FILES.items()):
 
 st.header("Summary Counts")
 
-scored_df = load_csv("providers_scored.csv")
-audited_df = load_csv("providers_audited.csv")
-verified_df = load_csv("providers_verified.csv")
-call_sheet_df = load_csv("call_sheet.csv")
+scored_df = load_first_csv(["crm/providers_scored.csv", "providers_scored.csv"])
+audited_df = load_first_csv(["debug/providers_audited.csv", "providers_audited.csv"])
+verified_df = load_first_csv(["debug/providers_verified.csv", "providers_verified.csv"])
+call_sheet_df = load_first_csv(["open_in_sheets/call_sheet.csv", "call_sheet.csv"])
+call_log_df = load_first_csv(["open_in_sheets/call_log.csv", "call_log.csv"])
 
 # Use audited if available, otherwise verified for status counts
 status_source = audited_df if audited_df is not None else verified_df
@@ -136,7 +148,7 @@ if main_df is not None:
 else:
     filtered_df = None
 
-tab_names = ["Verified", "Audited", "Scored", "Call Sheet"]
+tab_names = ["Verified", "Audited", "Scored", "Call Sheet", "Call Log"]
 tabs = st.tabs(tab_names)
 
 with tabs[0]:
@@ -176,6 +188,12 @@ with tabs[3]:
         st.dataframe(call_sheet_df, use_container_width=True)
     else:
         st.info("call_sheet.csv not found.")
+
+with tabs[4]:
+    if call_log_df is not None:
+        st.dataframe(call_log_df, use_container_width=True)
+    else:
+        st.info("call_log.csv not found.")
 
 # ─── Run pipeline ──────────────────────────────────────────────────────────────
 

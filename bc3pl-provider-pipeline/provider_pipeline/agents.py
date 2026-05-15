@@ -19,10 +19,17 @@ from provider_pipeline.csv_store import (
     write_scored_csv,
     write_call_sheet_csv,
 )
+from provider_pipeline.contact_enrichment import EnrichmentBudget
+from provider_pipeline.contact_enrichment import apollo_enrichment_batches
+from provider_pipeline.contact_enrichment import apollo_enrichment_payloads
 from provider_pipeline.contact_enrichment import enrich_contacts_if_enabled
+from provider_pipeline.contact_enrichment import plan_enrichment_for_provider
+from provider_pipeline.contact_enrichment import write_enrichment_diagnostics_csv
+from provider_pipeline.contact_enrichment import write_enrichment_diagnostics_jsonl
 from provider_pipeline.contacts import (
     contacts_from_provider,
     dedupe_contacts,
+    filter_call_sheet_contacts,
     keep_best_contacts_per_company,
     score_contact,
 )
@@ -31,6 +38,7 @@ from provider_pipeline.google_places import GooglePlacesClient
 from provider_pipeline.models import ProviderRecord
 from provider_pipeline.openai_auditor import OpenAIProviderAuditor
 from provider_pipeline.openai_enricher import OpenAIProviderEnricher
+from provider_pipeline.run_outputs import latest_file_path
 from provider_pipeline.sample_data import sample_provider_records
 from provider_pipeline.scoring import enrich_with_keywords, score_record
 from provider_pipeline.verification import verify_records
@@ -40,69 +48,88 @@ from provider_pipeline.verification import verify_records
 class PipelinePaths:
     output_dir: Path
 
+    def _path(self, filename: str) -> Path:
+        if self.output_dir.name == "latest":
+            return latest_file_path(self.output_dir, filename)
+        return self.output_dir / filename
+
     @property
     def raw_csv(self) -> Path:
-        return self.output_dir / "providers_raw.csv"
+        return self._path("providers_raw.csv")
 
     @property
     def raw_jsonl(self) -> Path:
-        return self.output_dir / "providers_raw.jsonl"
+        return self._path("providers_raw.jsonl")
 
     @property
     def enriched_csv(self) -> Path:
-        return self.output_dir / "providers_enriched.csv"
+        return self._path("providers_enriched.csv")
 
     @property
     def enriched_jsonl(self) -> Path:
-        return self.output_dir / "providers_enriched.jsonl"
+        return self._path("providers_enriched.jsonl")
 
     @property
     def scored_csv(self) -> Path:
-        return self.output_dir / "providers_scored.csv"
+        return self._path("providers_scored.csv")
 
     @property
     def scored_jsonl(self) -> Path:
-        return self.output_dir / "providers_scored.jsonl"
+        return self._path("providers_scored.jsonl")
 
     @property
     def verified_csv(self) -> Path:
-        return self.output_dir / "providers_verified.csv"
+        return self._path("providers_verified.csv")
 
     @property
     def verified_jsonl(self) -> Path:
-        return self.output_dir / "providers_verified.jsonl"
+        return self._path("providers_verified.jsonl")
 
     @property
     def audited_csv(self) -> Path:
-        return self.output_dir / "providers_audited.csv"
+        return self._path("providers_audited.csv")
 
     @property
     def audited_jsonl(self) -> Path:
-        return self.output_dir / "providers_audited.jsonl"
+        return self._path("providers_audited.jsonl")
 
     @property
     def call_sheet_csv(self) -> Path:
-        return self.output_dir / "call_sheet.csv"
+        return self._path("call_sheet.csv")
 
     @property
     def contacts_raw_csv(self) -> Path:
-        return self.output_dir / "provider_contacts_raw.csv"
+        return self._path("provider_contacts_raw.csv")
 
     @property
     def contacts_raw_jsonl(self) -> Path:
-        return self.output_dir / "provider_contacts_raw.jsonl"
+        return self._path("provider_contacts_raw.jsonl")
 
     @property
     def contacts_scored_csv(self) -> Path:
-        return self.output_dir / "provider_contacts_scored.csv"
+        return self._path("provider_contacts_scored.csv")
 
     @property
     def contacts_scored_jsonl(self) -> Path:
-        return self.output_dir / "provider_contacts_scored.jsonl"
+        return self._path("provider_contacts_scored.jsonl")
 
     @property
     def provider_contact_call_sheet_csv(self) -> Path:
-        return self.output_dir / "provider_contact_call_sheet.csv"
+        return self._path("provider_contact_call_sheet.csv")
+
+    @property
+    def contact_enrichment_report_csv(self) -> Path:
+        return self._path("contact_enrichment_report.csv")
+
+    @property
+    def contact_enrichment_report_jsonl(self) -> Path:
+        return self._path("contact_enrichment_report.jsonl")
+
+    @property
+    def contact_enrichment_cache_dir(self) -> Path:
+        if self.output_dir.name == "latest":
+            return self.output_dir / "debug" / "contact_enrichment_cache"
+        return self.output_dir / "contact_enrichment_cache"
 
 
 @dataclass(frozen=True)
@@ -131,6 +158,9 @@ class ContactStageResult:
     contact_count: int
     csv_path: str
     jsonl_path: str
+    enrichment_summary: dict[str, int] | None = None
+    report_csv_path: str = ""
+    report_jsonl_path: str = ""
 
 
 class ProviderFinderAgent:
@@ -356,10 +386,37 @@ class CallSheetAgent:
 
 
 class ContactFinderAgent:
-    def __init__(self, output_dir: Path) -> None:
+    def __init__(
+        self,
+        output_dir: Path,
+        use_hunter: bool = False,
+        use_apollo: bool = False,
+        use_apollo_enrich: bool = False,
+        enrichment_limit: int = 0,
+        dry_run: bool = False,
+        run_id: str = "",
+    ) -> None:
         self.paths = PipelinePaths(output_dir)
+        self.budget = EnrichmentBudget(
+            use_hunter=use_hunter,
+            use_apollo=use_apollo,
+            use_apollo_enrich=use_apollo_enrich,
+            dry_run=dry_run,
+            enrichment_limit=enrichment_limit,
+            run_id=run_id,
+        )
+        self.budget.load_key_visibility()
 
     def run(self) -> ContactStageResult:
+        if self.budget.dry_run:
+            self.plan_paid_enrichment()
+            return ContactStageResult(
+                contact_count=0,
+                csv_path="",
+                jsonl_path="",
+                enrichment_summary=self.budget.summary_counts(),
+            )
+
         providers = read_records_jsonl(
             _require_input(self.paths.scored_jsonl, "score-providers")
         )
@@ -372,17 +429,95 @@ class ContactFinderAgent:
 
         contacts = []
         for index, provider in enumerate(providers, start=1):
-            print(f"Finding contacts {index}/{len(providers)}: {provider.company}")
+            print(
+                f"Finding contacts {index}/{len(providers)}: {provider.company}",
+                flush=True,
+            )
             found_contacts = contacts_from_provider(provider)
-            contacts.extend(enrich_contacts_if_enabled(provider, found_contacts, enabled=False))
+            print(f"  found {len(found_contacts)} contact route(s)", flush=True)
+            contacts.extend(
+                enrich_contacts_if_enabled(
+                    provider,
+                    found_contacts,
+                    budget=self.budget,
+                    cache_dir=self.paths.contact_enrichment_cache_dir,
+                )
+            )
 
         write_contacts_csv(self.paths.contacts_raw_csv, contacts)
         write_contact_records_jsonl(self.paths.contacts_raw_jsonl, contacts)
+        self._write_enrichment_report()
         return ContactStageResult(
             contact_count=len(contacts),
             csv_path=str(self.paths.contacts_raw_csv.resolve()),
             jsonl_path=str(self.paths.contacts_raw_jsonl.resolve()),
+            enrichment_summary=self.budget.summary_counts(),
+            report_csv_path=str(self.paths.contact_enrichment_report_csv.resolve()),
+            report_jsonl_path=str(self.paths.contact_enrichment_report_jsonl.resolve()),
         )
+
+    def plan_paid_enrichment(self) -> EnrichmentBudget:
+        providers = read_records_jsonl(
+            _require_input(self.paths.scored_jsonl, "score-providers")
+        )
+        providers = [
+            provider
+            for provider in providers
+            if provider.verification_status != "rejected"
+        ]
+        providers.sort(key=_provider_contact_rank)
+        if self.budget.use_apollo_enrich:
+            self._plan_apollo_enrichment_from_existing_contacts()
+        for provider in providers:
+            plan_enrichment_for_provider(
+                provider,
+                budget=self.budget,
+                cache_dir=self.paths.contact_enrichment_cache_dir,
+            )
+        _print_enrichment_dry_run(self.budget)
+        return self.budget
+
+    def _write_enrichment_report(self) -> None:
+        if not self.budget.uses_paid_enrichment():
+            return
+        write_enrichment_diagnostics_csv(
+            self.paths.contact_enrichment_report_csv,
+            self.budget.diagnostics,
+        )
+        write_enrichment_diagnostics_jsonl(
+            self.paths.contact_enrichment_report_jsonl,
+            self.budget.diagnostics,
+        )
+
+    def _plan_apollo_enrichment_from_existing_contacts(self) -> None:
+        contacts_path = (
+            self.paths.contacts_raw_jsonl
+            if self.paths.contacts_raw_jsonl.exists()
+            else self.paths.contacts_scored_jsonl
+        )
+        if not contacts_path.exists():
+            return
+        contacts = read_contact_records_jsonl(contacts_path)
+        payloads = []
+        for contact in contacts:
+            provider = _provider_from_contact(contact)
+            domain = _domain_from_contact(contact)
+            payloads.extend(apollo_enrichment_payloads(provider, [contact], domain))
+        seen = set()
+        deduped_payloads = []
+        for payload in payloads:
+            key = tuple(sorted(payload.items()))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped_payloads.append(payload)
+        selected = (
+            deduped_payloads[: self.budget.enrichment_limit]
+            if self.budget.enrichment_limit > 0
+            else deduped_payloads
+        )
+        self.budget.apollo_enrichment_candidates = len(selected)
+        self.budget.apollo_enrichment_calls = len(apollo_enrichment_batches(selected))
 
 
 class ContactRoleScoringAgent:
@@ -395,7 +530,7 @@ class ContactRoleScoringAgent:
         )
         scored_contacts = [score_contact(contact) for contact in contacts]
         deduped_contacts = dedupe_contacts(scored_contacts)
-        kept_contacts = keep_best_contacts_per_company(deduped_contacts, limit=3)
+        kept_contacts = keep_best_contacts_per_company(filter_call_sheet_contacts(deduped_contacts), limit=3)
         kept_contacts.sort(key=_contact_output_rank)
 
         write_contacts_csv(self.paths.contacts_scored_csv, kept_contacts)
@@ -474,3 +609,44 @@ def _audit_rank(record: ProviderRecord) -> int:
 
     score += max(0, min(record.confidence, 100)) // 10
     return score
+
+
+def _provider_from_contact(contact) -> ProviderRecord:
+    return ProviderRecord(
+        company=contact.company,
+        city=contact.city,
+        phone=contact.company_phone,
+        website=contact.company_website,
+        place_id=contact.provider_place_id,
+        provider_category=contact.provider_category,
+        priority=contact.provider_priority,
+        lead_fit_score=contact.provider_score,
+    )
+
+
+def _domain_from_contact(contact) -> str:
+    website = contact.company_website or ""
+    if "://" not in website and website:
+        website = f"https://{website}"
+    from provider_pipeline.contact_enrichment import _domain_from_website
+
+    return _domain_from_website(website)
+
+
+def _print_enrichment_dry_run(budget: EnrichmentBudget) -> None:
+    print("")
+    print("Paid enrichment dry run:")
+    print(f"Hunter key visible: {'yes' if budget.hunter_key_visible else 'no'}")
+    print(f"Apollo key visible: {'yes' if budget.apollo_key_visible else 'no'}")
+    print(f"Hunter enabled: {'yes' if budget.use_hunter else 'no'}")
+    print(f"Apollo search enabled: {'yes' if budget.use_apollo else 'no'}")
+    print(f"Apollo enrichment enabled: {'yes' if budget.use_apollo_enrich else 'no'}")
+    print(f"Domains that would be enriched: {len(budget.domains)}")
+    for domain in budget.domains:
+        print(f"  {domain}")
+    print(f"Estimated Hunter calls: {budget.hunter_calls}")
+    print(f"Estimated Apollo search calls: {budget.apollo_search_calls}")
+    print(f"Estimated Apollo enrichment calls: {budget.apollo_enrichment_calls}")
+    print(f"Apollo enrichment candidate contacts: {budget.apollo_enrichment_candidates}")
+    print(f"Hunter cached domains: {len(set(budget.hunter_cached_domains))}")
+    print(f"Apollo cached domains: {len(set(budget.apollo_cached_domains))}")

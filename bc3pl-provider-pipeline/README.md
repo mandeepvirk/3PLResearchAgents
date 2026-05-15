@@ -6,22 +6,28 @@ It finds provider candidates, enriches them, scores fit for the buyer panel, ded
 
 ## What It Builds
 
-- `output/providers_raw.csv`: deduped provider candidates after discovery.
-- `output/providers_raw.jsonl`: raw provider intermediate for downstream agents.
-- `output/providers_enriched.csv`: enriched provider records before scoring.
-- `output/providers_enriched.jsonl`: enriched provider intermediate for downstream agents.
-- `output/providers_verified.csv`: verified provider records after approval/review/rejection.
-- `output/providers_verified.jsonl`: verified provider intermediate for downstream agents.
-- `output/providers_audited.csv`: high-value verified providers reviewed with the review model when audit is enabled.
-- `output/providers_audited.jsonl`: audited provider intermediate for downstream agents.
-- `output/providers_scored.csv`: enriched and scored provider records.
-- `output/providers_scored.jsonl`: scored provider intermediate for downstream agents.
-- `output/call_sheet.csv`: top call targets with a call angle and opener.
-- `output/provider_contacts_raw.csv`: website-discovered provider contacts and fallback routes.
-- `output/provider_contacts_raw.jsonl`: raw contact intermediate for downstream agents.
-- `output/provider_contacts_scored.csv`: deduped and role-scored provider contacts.
-- `output/provider_contacts_scored.jsonl`: scored contact intermediate for downstream agents.
-- `output/provider_contact_call_sheet.csv`: call-ready provider contacts for buyer-panel outreach.
+Every default full run writes to a timestamped run folder and mirrors the newest outputs for easy access:
+
+- `output/runs/YYYY-MM-DD_HH-MM-SS_run-all/`: historical outputs for one full provider run.
+- `output/runs/YYYY-MM-DD_HH-MM-SS_run-contact-flow/`: historical outputs for one contact-refresh run.
+- `output/latest/`: newest organized outputs from the last managed run.
+- `output/OPEN_THIS_FIRST.txt`: short guide for which files to open.
+- `manifest.json`: run metadata with command, timestamps, status, output files, parameters, and counts.
+
+The files to open are:
+
+- `output/latest/open_in_sheets/call_log.csv`: working call tracker. Import this into Google Sheets and update statuses here.
+- `output/latest/open_in_sheets/provider_contact_call_sheet.csv`: read-only suggested people/contact routes to call.
+- `output/latest/open_in_sheets/call_sheet.csv`: read-only company-level call sheet.
+
+Single-stage commands without an explicit `--output-dir` read from and write to the organized `output/latest` subfolders, falling back to existing flat `output/` files if no `latest` folder exists yet. If you pass `--output-dir`, the command respects that directory directly.
+
+Generated research files are organized into:
+
+- `output/latest/crm/`: scored provider/contact CSVs for CRM imports.
+- `output/latest/debug/`: JSONL files, manifest, paid enrichment diagnostics, and raw/enriched/verified/audited intermediate CSVs.
+
+The `output/latest` root intentionally contains only `OPEN_THIS_FIRST.txt`, `open_in_sheets/`, `crm/`, and `debug/`. Do not edit files in `crm/` or `debug/`.
 
 Lead products covered:
 
@@ -53,6 +59,8 @@ Run a no-key test first:
 ```bash
 python -m provider_pipeline run-all --sample --no-openai
 ```
+
+Sample runs write only to their timestamped folder in `output/runs/`; they do not replace `output/latest/`.
 
 Run live discovery:
 
@@ -145,10 +153,12 @@ python -m provider_pipeline build-call-sheet
 - Skips providers with `verification_status=rejected`
 - Checks public company website pages first: home, contact, about, team, leadership, management, locations, sales, and services pages
 - Extracts visible names, titles, emails, phones, mailto/tel links, and LinkedIn URLs that are already published on the company site
+- Rejects navigation labels, CTA text, page headings, addresses, postal codes, and long snippets as fake people/titles
 - Writes `output/provider_contacts_raw.csv` and `output/provider_contacts_raw.jsonl`
 
 ```bash
 python -m provider_pipeline find-provider-contacts
+python -m provider_pipeline find-provider-contacts --hunter
 ```
 
 `ContactRoleScoringAgent`
@@ -176,7 +186,25 @@ Run all three contact stages after provider scoring:
 
 ```bash
 python -m provider_pipeline run-contact-flow
+python -m provider_pipeline run-contact-flow --hunter
+python -m provider_pipeline run-contact-flow --hunter --apollo --enrichment-limit 3
 ```
+
+`--enrichment-limit` caps paid contact enrichment to the first N eligible provider domains. Use it for smoke tests before spending calls across the full provider list.
+
+Initialize or refresh the manual call log:
+
+```bash
+python -m provider_pipeline init-call-log
+```
+
+`init-call-log` reads `output/latest/open_in_sheets/provider_contact_call_sheet.csv` by default, or reads from the directory passed with `--output-dir`. It writes:
+
+- `output/latest/open_in_sheets/call_log.csv`
+- `output/latest/debug/call_log.jsonl`
+- copies inside the latest run folder when `output/latest/debug/manifest.json` points to one
+
+Rerunning the command is safe. It merges by company, contact name, phone, and email, adds new call targets, and preserves manually entered call status, notes, objections, follow-up dates, recordings, transcript links, summaries, and next actions.
 
 ## How The Pipeline Works
 
@@ -196,7 +224,46 @@ The contact flow is website-first and produces new outputs instead of changing t
 
 LinkedIn scraping is intentionally not supported. The pipeline may store LinkedIn URLs that appear on a public company website, but it does not automate LinkedIn browsing, login, or scraping.
 
-Paid enrichment is disabled by default. The code includes a placeholder for Hunter/Apollo-style enrichment, but missing `HUNTER_API_KEY` or `APOLLO_API_KEY` values do not stop the flow, and no paid API calls are made by the current commands.
+Website-only contact flow is the default. It uses public company sites and classifies contacts with `contact_quality`:
+
+- `named_person`: plausible human name with useful role/title evidence.
+- `personal_email_unknown_name`: personal-looking work email without a confirmed website name/title.
+- `department_email`: generic usable inbox such as sales, info, warehouse, logistics, dispatch, or operations.
+- `company_phone_fallback`: company phone route used only when no better contact route exists.
+- `bad_extraction`: rejected extraction; excluded from the provider contact call sheet and new call log targets.
+
+Hunter enrichment is optional and off by default. Add this to `.env` to enable it:
+
+```bash
+HUNTER_API_KEY=...
+```
+
+Then run:
+
+```bash
+python -m provider_pipeline run-contact-flow --hunter
+```
+
+Hunter and Apollo diagnostics are written to `output/latest/debug/contact_enrichment_report.csv` and `output/latest/debug/contact_enrichment_report.jsonl`. The report shows which domains were attempted, cache hits, HTTP statuses, short error messages, and contacts added. Hunter results are capped at 10 per domain by default and cached under the run output cache folder to avoid repeat API lookups. Missing paid API keys do not stop normal website-only runs. Hunter or Apollo may return LinkedIn URLs, which the pipeline stores as data, but it still does not browse or scrape LinkedIn.
+
+## Manual Call Tracking
+
+Call tracking is local CSV/JSONL only for now. There is no OpenPhone, CallRail, Twilio, or paid phone API integration.
+
+Use `output/latest/open_in_sheets/call_log.csv` while calling providers. The main status values are:
+
+- `not_called`: target is ready but no call has happened.
+- `called_no_answer`: call attempt made, no answer.
+- `left_voicemail`: voicemail left.
+- `gatekeeper`: reached reception, dispatch, or another blocker.
+- `wrong_contact`: contact is not the right person or route.
+- `interested`: verbal interest.
+- `not_interested`: verbal no.
+- `follow_up`: follow-up required.
+- `written_yes_received`: written acceptance received.
+- `do_not_call`: suppress future calls.
+
+Recordings and transcripts are manually linked with `recording_url` and `transcript_path`. Use `summary`, `objections`, and `next_action` to keep the next call clear.
 
 ## Provider CRM Columns
 

@@ -17,6 +17,14 @@ from provider_pipeline.agents import (
 )
 from provider_pipeline.env import load_env_file
 from provider_pipeline.pipeline import ProviderPipeline
+from provider_pipeline.call_tracking import init_call_log
+from provider_pipeline.run_outputs import (
+    RunOutputSession,
+    copy_latest_call_log_to_run,
+    explicit_output_dir,
+    mirror_latest_to_flat,
+    output_dir_for_single_stage,
+)
 
 
 COMMANDS = {
@@ -31,16 +39,24 @@ COMMANDS = {
     "score-provider-contacts",
     "build-provider-contact-call-sheet",
     "run-contact-flow",
+    "init-call-log",
 }
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     argv = list(sys.argv[1:] if argv is None else argv)
+    output_dir_explicit = any(
+        token == "--output-dir" or token.startswith("--output-dir=")
+        for token in argv
+    )
     if argv and argv[0] in COMMANDS:
-        return _build_subcommand_parser().parse_args(argv)
+        args = _build_subcommand_parser().parse_args(argv)
+        args.output_dir_explicit = output_dir_explicit
+        return args
 
     args = _build_legacy_parser().parse_args(argv)
     args.command = "run-all"
+    args.output_dir_explicit = output_dir_explicit
     return args
 
 
@@ -127,6 +143,12 @@ def _build_subcommand_parser() -> argparse.ArgumentParser:
         help="Read scored providers and find website contacts.",
     )
     _add_output_dir_arg(find_provider_contacts)
+    find_provider_contacts.add_argument(
+        "--hunter",
+        action="store_true",
+        help="Opt in to Hunter domain-search enrichment when HUNTER_API_KEY is set.",
+    )
+    _add_paid_enrichment_args(find_provider_contacts)
 
     score_provider_contacts = subparsers.add_parser(
         "score-provider-contacts",
@@ -145,6 +167,18 @@ def _build_subcommand_parser() -> argparse.ArgumentParser:
         help="Run contact finding, contact scoring, and contact call sheet export.",
     )
     _add_output_dir_arg(run_contact_flow)
+    run_contact_flow.add_argument(
+        "--hunter",
+        action="store_true",
+        help="Opt in to Hunter domain-search enrichment when HUNTER_API_KEY is set.",
+    )
+    _add_paid_enrichment_args(run_contact_flow)
+
+    init_call_log_parser = subparsers.add_parser(
+        "init-call-log",
+        help="Create or merge a manual provider call tracking log.",
+    )
+    _add_output_dir_arg(init_call_log_parser)
 
     return parser
 
@@ -197,6 +231,30 @@ def _add_output_dir_arg(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_paid_enrichment_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--apollo",
+        action="store_true",
+        help="Opt in to legacy Apollo People Search. Prefer --apollo-enrich for enrichment-only.",
+    )
+    parser.add_argument(
+        "--apollo-enrich",
+        action="store_true",
+        help="Opt in to Apollo People Enrichment using existing website/Hunter candidate contacts.",
+    )
+    parser.add_argument(
+        "--enrichment-limit",
+        type=int,
+        default=0,
+        help="Maximum paid domains for Hunter/search, or candidate contacts for --apollo-enrich. 0 means no cap.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report paid enrichment calls that would be made without calling paid APIs.",
+    )
+
+
 def main() -> None:
     load_env_file(Path(".env"))
     args = parse_args()
@@ -204,7 +262,7 @@ def main() -> None:
     if args.command == "find-providers":
         result = ProviderFinderAgent(
             config_path=Path(args.config),
-            output_dir=Path(args.output_dir),
+            output_dir=output_dir_for_single_stage(args),
             max_results_per_query=args.max_results_per_query,
             use_sample=args.sample,
         ).run()
@@ -214,11 +272,12 @@ def main() -> None:
         print(f"Raw providers written: {result.deduped_count}")
         print(f"CSV output: {result.csv_path}")
         print(f"JSONL output: {result.jsonl_path}")
+        mirror_latest_to_flat(args)
         return
 
     if args.command == "enrich-providers":
         result = ProviderEnrichmentAgent(
-            output_dir=Path(args.output_dir),
+            output_dir=output_dir_for_single_stage(args),
             use_openai=not args.no_openai,
         ).run()
         print("")
@@ -226,29 +285,32 @@ def main() -> None:
         print(f"Enriched providers: {result.record_count}")
         print(f"CSV output: {result.csv_path}")
         print(f"JSONL output: {result.jsonl_path}")
+        mirror_latest_to_flat(args)
         return
 
     if args.command == "score-providers":
-        result = ProviderScoringAgent(output_dir=Path(args.output_dir)).run()
+        result = ProviderScoringAgent(output_dir=output_dir_for_single_stage(args)).run()
         print("")
         print("Done.")
         print(f"Scored providers: {result.record_count}")
         print(f"CSV output: {result.csv_path}")
         print(f"JSONL output: {result.jsonl_path}")
+        mirror_latest_to_flat(args)
         return
 
     if args.command == "verify-providers":
-        result = ProviderVerificationAgent(output_dir=Path(args.output_dir)).run()
+        result = ProviderVerificationAgent(output_dir=output_dir_for_single_stage(args)).run()
         print("")
         print("Done.")
         print(f"Verified providers: {result.record_count}")
         print(f"CSV output: {result.csv_path}")
         print(f"JSONL output: {result.jsonl_path}")
+        mirror_latest_to_flat(args)
         return
 
     if args.command == "audit-providers":
         result = ProviderAuditAgent(
-            output_dir=Path(args.output_dir),
+            output_dir=output_dir_for_single_stage(args),
             limit=args.limit,
         ).run()
         print("")
@@ -256,64 +318,195 @@ def main() -> None:
         print(f"Audited provider records written: {result.record_count}")
         print(f"CSV output: {result.csv_path}")
         print(f"JSONL output: {result.jsonl_path}")
+        mirror_latest_to_flat(args)
         return
 
     if args.command == "build-call-sheet":
-        result = CallSheetAgent(output_dir=Path(args.output_dir)).run()
+        result = CallSheetAgent(output_dir=output_dir_for_single_stage(args)).run()
         print("")
         print("Done.")
         print(f"Call sheet rows: {result.call_sheet_count}")
         print(f"CSV output: {result.csv_path}")
+        mirror_latest_to_flat(args)
         return
 
     if args.command == "find-provider-contacts":
-        result = ContactFinderAgent(output_dir=Path(args.output_dir)).run()
+        if args.dry_run:
+            ContactFinderAgent(
+                output_dir=output_dir_for_single_stage(args),
+                use_hunter=args.hunter,
+                use_apollo=args.apollo,
+                use_apollo_enrich=args.apollo_enrich,
+                enrichment_limit=args.enrichment_limit,
+                dry_run=True,
+            ).plan_paid_enrichment()
+            return
+        result = ContactFinderAgent(
+            output_dir=output_dir_for_single_stage(args),
+            use_hunter=args.hunter,
+            use_apollo=args.apollo,
+            use_apollo_enrich=args.apollo_enrich,
+            enrichment_limit=args.enrichment_limit,
+            dry_run=args.dry_run,
+        ).run()
         print("")
         print("Done.")
         print(f"Raw contacts: {result.contact_count}")
         print(f"CSV output: {result.csv_path}")
         print(f"JSONL output: {result.jsonl_path}")
+        mirror_latest_to_flat(args)
         return
 
     if args.command == "score-provider-contacts":
-        result = ContactRoleScoringAgent(output_dir=Path(args.output_dir)).run()
+        result = ContactRoleScoringAgent(output_dir=output_dir_for_single_stage(args)).run()
         print("")
         print("Done.")
         print(f"Scored contacts: {result.contact_count}")
         print(f"CSV output: {result.csv_path}")
         print(f"JSONL output: {result.jsonl_path}")
+        mirror_latest_to_flat(args)
         return
 
     if args.command == "build-provider-contact-call-sheet":
-        result = ProviderContactCallSheetAgent(output_dir=Path(args.output_dir)).run()
+        result = ProviderContactCallSheetAgent(output_dir=output_dir_for_single_stage(args)).run()
         print("")
         print("Done.")
         print(f"Provider contact call sheet rows: {result.call_sheet_count}")
         print(f"CSV output: {result.csv_path}")
+        mirror_latest_to_flat(args)
         return
 
     if args.command == "run-contact-flow":
-        raw_result = ContactFinderAgent(output_dir=Path(args.output_dir)).run()
-        scored_result = ContactRoleScoringAgent(output_dir=Path(args.output_dir)).run()
-        call_sheet_result = ProviderContactCallSheetAgent(output_dir=Path(args.output_dir)).run()
+        if args.dry_run:
+            output_dir = Path(args.output_dir) if explicit_output_dir(args) else output_dir_for_single_stage(args)
+            ContactFinderAgent(
+                output_dir=output_dir,
+                use_hunter=args.hunter,
+                use_apollo=args.apollo,
+                use_apollo_enrich=args.apollo_enrich,
+                enrichment_limit=args.enrichment_limit,
+                dry_run=True,
+            ).plan_paid_enrichment()
+            return
+
+        if explicit_output_dir(args):
+            output_dir = Path(args.output_dir)
+            raw_result = ContactFinderAgent(
+                output_dir=output_dir,
+                use_hunter=args.hunter,
+                use_apollo=args.apollo,
+                use_apollo_enrich=args.apollo_enrich,
+                enrichment_limit=args.enrichment_limit,
+                dry_run=args.dry_run,
+            ).run()
+            scored_result = ContactRoleScoringAgent(output_dir=output_dir).run()
+            call_sheet_result = ProviderContactCallSheetAgent(output_dir=output_dir).run()
+        else:
+            session = RunOutputSession(
+                base_output_dir=Path(args.output_dir),
+                command=args.command,
+            )
+            session.seed_from_latest_or_flat()
+            try:
+                raw_result = ContactFinderAgent(
+                    output_dir=session.run_dir,
+                    use_hunter=args.hunter,
+                    use_apollo=args.apollo,
+                    use_apollo_enrich=args.apollo_enrich,
+                    enrichment_limit=args.enrichment_limit,
+                    dry_run=args.dry_run,
+                    run_id=session.run_id,
+                ).run()
+                scored_result = ContactRoleScoringAgent(output_dir=session.run_dir).run()
+                call_sheet_result = ProviderContactCallSheetAgent(output_dir=session.run_dir).run()
+                counts = {
+                    "raw_contacts": raw_result.contact_count,
+                    "scored_contacts": scored_result.contact_count,
+                    "provider_contact_call_sheet_rows": call_sheet_result.call_sheet_count,
+                    "hunter_enabled": args.hunter,
+                    "apollo_enabled": args.apollo,
+                    "apollo_enrich_enabled": args.apollo_enrich,
+                    "dry_run": args.dry_run,
+                    "enrichment_limit": args.enrichment_limit,
+                }
+                counts.update(raw_result.enrichment_summary or {})
+                session.complete(counts)
+            except Exception as error:
+                session.fail(error)
+                raise
         print("")
         print("Done.")
         print(f"Raw contacts: {raw_result.contact_count}")
         print(f"Scored contacts: {scored_result.contact_count}")
         print(f"Provider contact call sheet rows: {call_sheet_result.call_sheet_count}")
         print(f"CSV output: {call_sheet_result.csv_path}")
+        if raw_result.report_csv_path:
+            print(f"Enrichment report CSV: {raw_result.report_csv_path}")
+        if raw_result.report_jsonl_path:
+            print(f"Enrichment report JSONL: {raw_result.report_jsonl_path}")
         return
 
-    pipeline = ProviderPipeline(
-        config_path=Path(args.config),
-        output_dir=Path(args.output_dir),
-        max_results_per_query=args.max_results_per_query,
-        use_openai=not args.no_openai,
-        use_sample=args.sample,
-        use_audit=args.audit,
-        audit_limit=args.audit_limit,
-    )
-    result = pipeline.run()
+    if args.command == "init-call-log":
+        output_dir = output_dir_for_single_stage(args)
+        row_count, csv_path, jsonl_path = init_call_log(output_dir)
+        mirror_latest_to_flat(args)
+        run_dir = copy_latest_call_log_to_run(args)
+        print("")
+        print("Done.")
+        print(f"Call log rows: {row_count}")
+        print(f"CSV output: {csv_path}")
+        print(f"JSONL output: {jsonl_path}")
+        if run_dir is not None:
+            print(f"Run folder copy: {run_dir}")
+        return
+
+    if explicit_output_dir(args):
+        output_dir = Path(args.output_dir)
+        pipeline = ProviderPipeline(
+            config_path=Path(args.config),
+            output_dir=output_dir,
+            max_results_per_query=args.max_results_per_query,
+            use_openai=not args.no_openai,
+            use_sample=args.sample,
+            use_audit=args.audit,
+            audit_limit=args.audit_limit,
+        )
+        result = pipeline.run()
+    else:
+        session = RunOutputSession(
+            base_output_dir=Path(args.output_dir),
+            command=args.command,
+            mirror_to_latest=not args.sample,
+            metadata={
+                "config_path": args.config,
+                "max_results_per_query": args.max_results_per_query,
+                "audit_enabled": args.audit,
+                "audit_limit": args.audit_limit,
+                "no_openai": args.no_openai,
+                "sample": args.sample,
+            },
+        )
+        pipeline = ProviderPipeline(
+            config_path=Path(args.config),
+            output_dir=session.run_dir,
+            max_results_per_query=args.max_results_per_query,
+            use_openai=not args.no_openai,
+            use_sample=args.sample,
+            use_audit=args.audit,
+            audit_limit=args.audit_limit,
+        )
+        try:
+            result = pipeline.run()
+            session.complete(
+                {
+                    "raw_providers": result.raw_count,
+                    "deduped_providers": result.deduped_count,
+                    "call_sheet_rows": result.call_sheet_count,
+                }
+            )
+        except Exception as error:
+            session.fail(error)
+            raise
     print("")
     print("Done.")
     print(f"Raw providers: {result.raw_count}")

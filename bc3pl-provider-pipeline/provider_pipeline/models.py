@@ -70,6 +70,7 @@ class ContactRecord:
     linkedin_url: str = ""
     source_url: str = ""
     source_type: str = ""
+    contact_quality: str = ""
     seniority_score: int = 0
     role_fit_score: int = 0
     confidence: int = 0
@@ -77,6 +78,39 @@ class ContactRecord:
     call_priority: str = "C"
     call_opener: str = ""
     notes: str = ""
+
+
+@dataclass
+class CallLogRecord:
+    call_id: str
+    run_id: str = ""
+    company: str = ""
+    provider_place_id: str = ""
+    provider_category: str = ""
+    provider_priority: str = ""
+    provider_score: int = 0
+    contact_name: str = ""
+    contact_title: str = ""
+    phone_called: str = ""
+    email: str = ""
+    contact_quality: str = ""
+    source_type: str = ""
+    email_status: str = ""
+    linkedin_url: str = ""
+    department: str = ""
+    confidence: int = 0
+    call_datetime: str = ""
+    call_status: str = "not_called"
+    outcome: str = ""
+    accepted_standard_price: str = ""
+    accepted_exclusive_price: str = ""
+    follow_up_date: str = ""
+    objections: str = ""
+    notes: str = ""
+    recording_url: str = ""
+    transcript_path: str = ""
+    summary: str = ""
+    next_action: str = ""
 
 
 @dataclass(frozen=True)
